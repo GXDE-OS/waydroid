@@ -2,15 +2,19 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import subprocess
 import os
-import re
 import logging
 import glob
 import shutil
+import signal
+import stat
+import sys
 import time
 import platform
 import gbinder
 import tools.config
 import tools.helpers.run
+from contextlib import suppress
+from pathlib import Path
 
 def get_lxc_version(args):
     if shutil.which("lxc-info") is not None:
@@ -55,15 +59,16 @@ def generate_nodes_lxc_config(args):
     make_entry("/dev/pvr_sync")
     make_entry("/dev/pmsg0")
     make_entry("/dev/dxg")
-    render, card = tools.helpers.gpu.getDriNode(args)
-    make_entry(render, "dev/dri/renderD128")
-    make_entry(card, "dev/dri/card0")
+    render, _ = tools.helpers.gpu.getDriNode(args)
+    make_entry(render)
 
     for n in glob.glob("/dev/fb*"):
         make_entry(n)
     for n in glob.glob("/dev/graphics/fb*"):
         make_entry(n)
     for n in glob.glob("/dev/video*"):
+        make_entry(n)
+    for n in glob.glob("/dev/dma_heap/*"):
         make_entry(n)
 
     # Binder dev nodes
@@ -131,7 +136,7 @@ def get_apparmor_status(args):
     try:
         with open("/sys/kernel/security/apparmor/profiles", "r") as f:
             enabled &= (LXC_APPARMOR_PROFILE in f.read())
-    except:
+    except Exception:
         enabled = False
     return enabled
 
@@ -159,6 +164,9 @@ def set_lxc_config(args):
     tools.helpers.run.user(args, command)
     command = ["sed", "-i", "s/LXCARCH/{}/".format(platform.machine()), lxc_path + "/config"]
     tools.helpers.run.user(args, command)
+    post_stop_script = tools.config.tools_src + "/data/scripts/waydroid-post-stop.sh"
+    command = ["sed", "-i", "s#LXCPOSTSTOP#{}#".format(post_stop_script), lxc_path + "/config"]
+    tools.helpers.run.user(args, command)
     command = ["cp", "-fpr", seccomp_profile, lxc_path + "/waydroid.seccomp"]
     tools.helpers.run.user(args, command)
     if get_apparmor_status(args):
@@ -167,15 +175,13 @@ def set_lxc_config(args):
 
     nodes = generate_nodes_lxc_config(args)
     config_nodes_tmp_path = args.work + "/config_nodes"
-    config_nodes = open(config_nodes_tmp_path, "w")
-    for node in nodes:
-        config_nodes.write(node + "\n")
-    config_nodes.close()
+    with open(config_nodes_tmp_path, "w") as f:
+        f.writelines(node + "\n" for node in nodes)
     command = ["mv", config_nodes_tmp_path, lxc_path]
     tools.helpers.run.user(args, command)
 
     # Create empty file
-    open(os.path.join(lxc_path, "config_session"), mode="w").close()
+    Path(os.path.join(lxc_path, "config_session")).touch()
 
 def generate_session_lxc_config(args, session):
     nodes = []
@@ -208,10 +214,8 @@ def generate_session_lxc_config(args, session):
 
     lxc_path = tools.config.defaults["lxc"] + "/waydroid"
     config_nodes_tmp_path = args.work + "/config_session"
-    config_nodes = open(config_nodes_tmp_path, "w")
-    for node in nodes:
-        config_nodes.write(node + "\n")
-    config_nodes.close()
+    with open(config_nodes_tmp_path, "w") as f:
+        f.writelines(node + "\n" for node in nodes)
     command = ["mv", config_nodes_tmp_path, lxc_path]
     tools.helpers.run.user(args, command)
 
@@ -239,13 +243,27 @@ def make_base_props(args):
         try:
             sm = gbinder.ServiceManager("/dev/hwbinder")
             return intf in sm.list_sync()
-        except:
+        except Exception:
+            return False
+
+    def find_aidl(intf):
+        if args.vendor_type == "MAINLINE":
+            return False
+
+        try:
+            sm = gbinder.ServiceManager("/dev/binder")
+            return intf in sm.list_sync()
+        except Exception:
             return False
 
     props = []
 
     if not os.path.exists("/dev/ashmem"):
         props.append("sys.use_memfd=true")
+
+    # Added for security reasons
+    props.append("ro.adb.secure=1")
+    props.append("ro.debuggable=0")
 
     egl = tools.helpers.props.host_get(args, "ro.hardware.egl")
     dri, _ = tools.helpers.gpu.getDriNode(args)
@@ -254,10 +272,13 @@ def make_base_props(args):
     if not gralloc:
         if find_hidl("android.hardware.graphics.allocator@4.0::IAllocator/default"):
             gralloc = "android"
+        elif find_aidl("android.hardware.graphics.allocator.IAllocator/default"):
+            gralloc = "android"
     if not gralloc:
         if dri:
             gralloc = "gbm"
             egl = "mesa"
+            props.append("gralloc.gbm.device=" + dri)
         else:
             gralloc = "default"
             egl = "swiftshader"
@@ -300,8 +321,13 @@ def make_base_props(args):
 
     opengles = tools.helpers.props.host_get(args, "ro.opengles.version")
     if opengles == "":
-        opengles = "196609"
+        opengles = "196610"
     props.append("ro.opengles.version=" + opengles)
+
+    # Some Mali devices require ro.vendor.arm.egl.* props from the
+    # host for libEGL/GLES to work
+    for k, v in tools.helpers.props.host_list(args, "ro.vendor.arm.egl.").items():
+        props.append(k + "=" + v)
 
     if args.images_path not in tools.config.defaults["preinstalled_images_paths"]:
         props.append("waydroid.system_ota=" + args.system_ota)
@@ -339,10 +365,8 @@ def make_base_props(args):
                 props.pop(idx)
         props.append(k+"="+v)
 
-    base_props = open(args.work + "/waydroid_base.prop", "w")
-    for prop in props:
-        base_props.write(prop + "\n")
-    base_props.close()
+    with open(args.work + "/waydroid_base.prop", "w") as f:
+        f.writelines(prop + "\n" for prop in props)
 
 
 def setup_host_perms(args):
@@ -377,7 +401,7 @@ def status(args):
     command = ["lxc-info", "-P", tools.config.defaults["lxc"], "-n", "waydroid", "-sH"]
     try:
         return tools.helpers.run.user(args, command, output_return=True).strip()
-    except:
+    except Exception:
         logging.info("Couldn't get LXC status. Assuming STOPPED.")
         return "STOPPED"
 
@@ -399,7 +423,8 @@ def start(args):
     tools.helpers.run.user(args, command, output="background")
     wait_for_running(args)
     # Workaround lxc-start changing stdout/stderr permissions to 700
-    os.chmod(args.log, 0o666)
+    with suppress(OSError):
+        os.chmod(args.log, 0o666)
 
 def stop(args):
     command = ["lxc-stop", "-P",
@@ -427,8 +452,22 @@ ANDROID_ENV = {
     "BOOTCLASSPATH": "/apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.art/javalib/core-icu4j.jar:/apex/com.android.art/javalib/okhttp.jar:/apex/com.android.art/javalib/bouncycastle.jar:/apex/com.android.art/javalib/apache-xml.jar:/system/framework/framework.jar:/system/framework/ext.jar:/system/framework/telephony-common.jar:/system/framework/voip-common.jar:/system/framework/ims-common.jar:/system/framework/framework-atb-backward-compatibility.jar:/apex/com.android.conscrypt/javalib/conscrypt.jar:/apex/com.android.media/javalib/updatable-media.jar:/apex/com.android.mediaprovider/javalib/framework-mediaprovider.jar:/apex/com.android.os.statsd/javalib/framework-statsd.jar:/apex/com.android.permission/javalib/framework-permission.jar:/apex/com.android.sdkext/javalib/framework-sdkextensions.jar:/apex/com.android.wifi/javalib/framework-wifi.jar:/apex/com.android.tethering/javalib/framework-tethering.jar"
 }
 
-def android_env_attach_options():
-    env = [k + "=" + v for k, v in ANDROID_ENV.items()]
+def android_env_attach_options(args):
+    local_env = ANDROID_ENV.copy()
+    # Include CLASSPATH env that was generated by Android
+    command = ["lxc-attach", "-P", tools.config.defaults["lxc"],
+               "-n", "waydroid", "--clear-env", "--",
+               "/system/bin/cat" ,"/data/system/environ/classpath"]
+    allowed = ["CLASSPATH", "SYSTEMSERVER"]
+    with suppress(Exception):
+        p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        out, _ = p.communicate()
+        if p.returncode == 0:
+            for line in out.decode().splitlines():
+                _, k, v = line.split(' ', 2)
+                if any(pattern in k for pattern in allowed):
+                    local_env[k] = v
+    env = [k + "=" + v for k, v in local_env.items()]
     return [x for var in env for x in ("--set-var", var)]
 
 def shell(args):
@@ -440,12 +479,12 @@ def shell(args):
         return
     command = ["lxc-attach", "-P", tools.config.defaults["lxc"],
                "-n", "waydroid", "--clear-env"]
-    command.extend(android_env_attach_options())
-    if args.uid!=None:
+    command.extend(android_env_attach_options(args))
+    if args.uid is not None:
         command.append("--uid="+str(args.uid))
-    if args.gid!=None:
+    if args.gid is not None:
         command.append("--gid="+str(args.gid))
-    elif args.uid!=None:
+    elif args.uid is not None:
         command.append("--gid="+str(args.uid))
     if args.nolsm or args.allcaps or args.nocgroup:
         elevatedprivs = "--elevated-privileges="
@@ -466,19 +505,34 @@ def shell(args):
             elevatedprivs+="CGROUP"
             addpipe = True
         command.append(elevatedprivs)
-    if args.context!=None and not args.nolsm:
+    if args.context is not None and not args.nolsm:
         command.append("--context="+args.context)
     command.append("--")
     if args.COMMAND:
         command.extend(args.COMMAND)
     else:
         command.append("/system/bin/sh")
-    subprocess.run(command)
+
+    def mock_sigint(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, mock_sigint)
+    signal.signal(signal.SIGHUP, mock_sigint)
+
+    perms = stat.S_IMODE(os.stat(sys.stdout.fileno()).st_mode)
+    try:
+        subprocess.run(command)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        os.chmod(sys.stdout.fileno(), perms)
+
     if state == "FROZEN":
         freeze(args)
 
 def logcat(args):
     args.COMMAND = ["/system/bin/logcat"]
+    if args.ARGS:
+        args.COMMAND.extend(args.ARGS)
     args.uid = None
     args.gid = None
     args.nolsm = None

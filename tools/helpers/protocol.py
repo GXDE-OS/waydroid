@@ -10,8 +10,8 @@ def set_aidl_version(args):
         android_api = int(helpers.props.file_get(args,
                 tools.config.defaults["rootfs"] + "/system/build.prop",
                 "ro.build.version.sdk"))
-    except:
-        logging.error("Failed to parse android version from system.img")
+    except Exception as e:
+        logging.error("Failed to parse android version from system.img: %s", e)
 
     if android_api < 28:
         binder_protocol = "aidl"
@@ -22,9 +22,18 @@ def set_aidl_version(args):
     elif android_api < 31:
         binder_protocol = "aidl3"
         sm_protocol =     "aidl3"
+    elif android_api < 33:
+        binder_protocol = "aidl4"
+        sm_protocol =     "aidl3"
+    elif android_api < 35:
+        binder_protocol = "aidl3"
+        sm_protocol =     "aidl3"
+    elif android_api < 36:
+        binder_protocol = "aidl3"
+        sm_protocol =     "aidl5"
     else:
         binder_protocol = "aidl3"
-        sm_protocol =     "aidl4"
+        sm_protocol =     "aidl6"
 
     cfg["waydroid"]["binder_protocol"] = binder_protocol
     cfg["waydroid"]["service_manager_protocol"] = sm_protocol

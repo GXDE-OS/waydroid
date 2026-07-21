@@ -2,10 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import logging
 import os
-import time
 import signal
 import sys
-import shutil
 import tools.config
 import tools.helpers.ipc
 from tools import services
@@ -26,13 +24,22 @@ class DbusSessionManager(dbus.service.Object):
         do_stop(self.args, self.looper)
         stop_container(quit_session=False)
 
+def handle_disconnect(args, looper):
+    do_stop(args, looper)
+    stop_container(quit_session=False)
+
 def service(args, looper):
-    dbus_obj = DbusSessionManager(looper, dbus.SessionBus(), '/SessionManager', args)
+    bus = dbus.SessionBus()
+    bus.set_exit_on_disconnect(False)
+    bus.add_signal_receiver(lambda: handle_disconnect(args, looper),
+                            signal_name='Disconnected',
+                            dbus_interface='org.freedesktop.DBus.Local')
+    _session_manager = DbusSessionManager(looper, dbus.SessionBus(), '/SessionManager', args)
     looper.run()
 
 def start(args, unlocked_cb=None, background=True):
     try:
-        name = dbus.service.BusName("id.waydro.Session", dbus.SessionBus(), do_not_queue=True)
+        _name = dbus.service.BusName("id.waydro.Session", dbus.SessionBus(), do_not_queue=True)
     except dbus.exceptions.NameExistsException:
         logging.error("Session is already running")
         if unlocked_cb:
@@ -52,7 +59,7 @@ def start(args, unlocked_cb=None, background=True):
     else:
         xdg_runtime_dir = session["xdg_runtime_dir"]
         if xdg_runtime_dir == "None" or not xdg_runtime_dir:
-            logging.error(f"XDG_RUNTIME_DIR is not set; please don't start a Waydroid session with 'sudo'!")
+            logging.error("XDG_RUNTIME_DIR is not set; please don't start a Waydroid session with 'sudo'!")
             sys.exit(1)
         wayland_socket_path = os.path.join(xdg_runtime_dir, wayland_display)
     if not os.path.exists(wayland_socket_path):
@@ -83,6 +90,7 @@ def start(args, unlocked_cb=None, background=True):
     def sigusr_handler(data):
         do_stop(args, mainloop)
 
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGHUP, sigint_handler, None)
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, sigint_handler, None)
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, sigint_handler, None)
     GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGUSR1, sigusr_handler, None)
@@ -98,11 +106,13 @@ def start(args, unlocked_cb=None, background=True):
 
     services.user_manager.start(args, session, unlocked_cb)
     services.clipboard_manager.start(args)
+    services.notification_manager.start(args, session)
     service(args, mainloop)
 
 def do_stop(args, looper):
     services.user_manager.stop(args)
     services.clipboard_manager.stop(args)
+    services.notification_manager.stop(args)
     looper.quit()
 
 def stop(args):

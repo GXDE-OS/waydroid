@@ -12,7 +12,7 @@ from tools.config.save import save
 #
 # Exported variables (internal configuration)
 #
-version = "1.4.3"
+version = "1.6.3"
 tools_src = os.path.normpath(os.path.realpath(__file__) + "/../../..")
 
 # Keys saved in the config file (mostly what we ask in 'waydroid init')
@@ -40,7 +40,7 @@ defaults = {
     ],
     "suspend_action": "freeze",
     "mount_overlays": "True",
-    "auto_adb": "True",
+    "auto_adb": "False",
     "container_xdg_runtime_dir": "/run/xdg",
     "container_wayland_display": "wayland-0",
 }
@@ -68,8 +68,8 @@ session_defaults = {
     "lcd_density": "0",
     "background_start": "true"
 }
-session_defaults["waydroid_data"] = session_defaults["xdg_data_home"] + \
-    "/waydroid/data"
+session_defaults["waydroid_user_state"] = session_defaults["xdg_data_home"] + "/waydroid"
+session_defaults["waydroid_data"] = session_defaults["waydroid_user_state"] + "/data"
 if session_defaults["pulse_runtime_path"] == "None":
     session_defaults["pulse_runtime_path"] = session_defaults["xdg_runtime_dir"] + "/pulse"
 

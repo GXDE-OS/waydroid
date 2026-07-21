@@ -1,7 +1,9 @@
+<img align="left" src="data/AppIcon.png" width="64">
+
 # Waydroid
 
 Waydroid uses a container-based approach to boot a full Android system on a
-regular GNU/Linux system like Ubuntu.
+regular GNU/Linux system.
 
 ## Overview
 
@@ -13,17 +15,23 @@ The Android system inside the container has direct access to any needed hardware
 
 The Android runtime environment ships with a minimal customized Android system
 image based on [LineageOS](https://lineageos.org/). The image is currently based
-on Android 11.
+on Android 13.
+
+## Install
+
+See install instructions [here](https://docs.waydro.id/usage/install-on-desktops)
 
 ## Documentation
 
-Our documentation site can be found at [docs.waydro.id](https://docs.waydro.id)
+Our documentation can be found at [docs.waydro.id](https://docs.waydro.id)
 
 ## Reporting bugs
 
-If you have found an issue with Waydroid, please [file a bug](https://github.com/Waydroid/waydroid/issues/new).
+If you have found an issue with Waydroid, please [file a bug](https://github.com/Waydroid/waydroid/issues/new/choose).
 
 ## Get in Touch
 
 If you want to get in contact with the developers please feel free to join the
 *Waydroid* groups in [Matrix](https://matrix.to/#/#waydroid:matrix.org) or [Telegram](https://t.me/WayDroid).
+
+Our website can be found at [waydro.id](https://waydro.id/)

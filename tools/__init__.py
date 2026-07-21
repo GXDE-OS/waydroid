@@ -14,6 +14,13 @@ from . import config
 from . import helpers
 from .helpers import logging as tools_logging
 
+def prep_args(args):
+    args.cache = {}
+    args.work = config.defaults["work"]
+    args.config = args.work + "/waydroid.cfg"
+    args.log = args.work + "/waydroid.log"
+    args.sudo_timer = True
+    args.timeout = 1800
 
 def main():
     def actionNeedRoot(action):
@@ -26,12 +33,7 @@ def main():
     try:
         # Parse arguments, set up logging
         args = helpers.arguments()
-        args.cache = {}
-        args.work = config.defaults["work"]
-        args.config = args.work + "/waydroid.cfg"
-        args.log = args.work + "/waydroid.log"
-        args.sudo_timer = True
-        args.timeout = 1800
+        prep_args(args)
 
         if os.geteuid() == 0:
             if not os.path.exists(args.work):
@@ -43,25 +45,21 @@ def main():
 
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         dbus.mainloop.glib.threads_init()
-        dbus_name_scope = None
+
+        if args.action is None:
+            args.action = "first-launch"
 
         if not actions.initializer.is_initialized(args) and \
-                args.action and args.action not in ("init", "first-launch", "log"):
-            if args.wait_for_init:
-                try:
-                    dbus_name_scope = dbus.service.BusName("id.waydro.Container", dbus.SystemBus(), do_not_queue=True)
-                    actions.wait_for_init(args)
-                except dbus.exceptions.NameExistsException:
-                    print('ERROR: WayDroid service is already awaiting initialization')
-                    return 1
-            else:
-                print('ERROR: WayDroid is not initialized, run "waydroid init"')
-                return 0
+                args.action not in ("init", "container", "first-launch", "log", "bugreport"):
+            print('Waydroid is not initialized, run "waydroid init"')
+            return 0
 
-        # Initialize or require config
         if args.action == "init":
-            actionNeedRoot(args.action)
-            actions.init(args)
+            if args.client:
+                actions.remote_init_client(args)
+            else:
+                actionNeedRoot(args.action)
+                actions.init(args)
         elif args.action == "upgrade":
             actionNeedRoot(args.action)
             actions.upgrade(args)
@@ -76,12 +74,6 @@ def main():
         elif args.action == "container":
             actionNeedRoot(args.action)
             if args.subaction == "start":
-                if dbus_name_scope is None:
-                    try:
-                        dbus_name_scope = dbus.service.BusName("id.waydro.Container", dbus.SystemBus(), do_not_queue=True)
-                    except dbus.exceptions.NameExistsException:
-                        print('ERROR: WayDroid container service is already running')
-                        return 1
                 actions.container_manager.start(args)
             elif args.subaction == "stop":
                 actions.container_manager.stop(args)
@@ -125,11 +117,19 @@ def main():
         elif args.action == "show-full-ui":
             actions.app_manager.showFullUI(args)
         elif args.action == "first-launch":
-            actions.remote_init_client(args)
+            if not actions.initializer.is_initialized(args):
+                actions.remote_init_client(args)
             if actions.initializer.is_initialized(args):
                 actions.app_manager.showFullUI(args)
         elif args.action == "status":
             actions.status.print_status(args)
+        elif args.action == "adb":
+            if args.subaction == "connect":
+                helpers.net.adb_connect(args)
+            elif args.subaction == "disconnect":
+                helpers.net.adb_disconnect(args)
+            else:
+                logging.info("Run waydroid {} -h for usage information.".format(args.action))
         elif args.action == "log":
             if args.clear_log:
                 helpers.run.user(args, ["truncate", "-s", "0", args.log])
@@ -138,6 +138,8 @@ def main():
                     args, ["tail", "-n", args.lines, "-F", args.log], output="tui")
             except KeyboardInterrupt:
                 pass
+        elif args.action == "bugreport":
+            actions.bugreport(args)
         else:
             logging.info("Run waydroid -h for usage information.")
 
@@ -152,12 +154,14 @@ def main():
         logging.info("See also: <https://github.com/waydroid>")
         logging.debug(traceback.format_exc())
 
+        if args and args.details_to_stdout:
+            return 1
+
         # Hints about the log file (print to stdout only)
         log_hint = "Run 'waydroid log' for details."
-        if not args or not os.path.exists(args.log):
-            log_hint += (" Alternatively you can use '--details-to-stdout' to"
-                         " get more output, e.g. 'waydroid"
-                         " --details-to-stdout init'.")
+        if not args or not os.path.exists(args.log) or not args.action == "container":
+            log_hint = ("Use '--details-to-stdout' to get more details:\n"
+                         f"  {sys.argv[0]} --details-to-stdout {' '.join(sys.argv[1:])}")
         print(log_hint)
         return 1
 

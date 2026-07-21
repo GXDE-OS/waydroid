@@ -33,6 +33,7 @@ def arguments_init(subparser):
                      help="rom type (options: \"lineage\", \"bliss\" or OTA channel URL; default is LineageOS)")
     ret.add_argument("-s", "--system_type",
                      help="system type (options: VANILLA, FOSS or GAPPS; default is VANILLA)")
+    ret.add_argument("--client", help="run as user mode, connecting to the remote initializer service", action="store_true")
     return ret
 
 def arguments_status(subparser):
@@ -105,7 +106,7 @@ def arguments_fullUI(subparser):
     return ret
 
 def arguments_firstLaunch(subparser):
-    ret = subparser.add_parser("first-launch", help="initialize waydroid and start it")
+    ret = subparser.add_parser("first-launch", help="start waydroid, prompting to initialize waydroid first if necessary (default)")
     return ret
 
 def arguments_shell(subparser):
@@ -121,6 +122,18 @@ def arguments_shell(subparser):
 
 def arguments_logcat(subparser):
     ret = subparser.add_parser("logcat", help="show android logcat")
+    ret.add_argument('ARGS', nargs='*', help="arguments to pass to logcat")
+    return ret
+
+def arguments_adb(subparser):
+    ret = subparser.add_parser("adb", help="manage adb connection")
+    sub = ret.add_subparsers(title="subaction", dest="subaction")
+    sub.add_parser("connect", help="connect adb to the Android container")
+    sub.add_parser("disconnect", help="disconnect adb from the Android container")
+    return ret
+
+def arguments_bugreport(subparser):
+    ret = subparser.add_parser("bugreport", help="create a bugreport archive interactively")
     return ret
 
 def arguments():
@@ -142,8 +155,6 @@ def arguments():
                         " logfiles (this may reduce performance)")
     parser.add_argument("-q", "--quiet", dest="quiet", action="store_true",
                         help="do not output any log messages")
-    parser.add_argument("-w", "--wait", dest="wait_for_init", action="store_true",
-                        help="wait for init before running")
 
     # Actions
     sub = parser.add_subparsers(title="action", dest="action")
@@ -160,6 +171,8 @@ def arguments():
     arguments_firstLaunch(sub)
     arguments_shell(sub)
     arguments_logcat(sub)
+    arguments_adb(sub)
+    arguments_bugreport(sub)
 
     if argcomplete:
         argcomplete.autocomplete(parser, always_complete_options="long")

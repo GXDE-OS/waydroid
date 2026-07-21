@@ -4,7 +4,7 @@ import logging
 import os
 from tools import helpers
 import tools.config
-
+import stat
 import sys
 import threading
 import multiprocessing
@@ -13,6 +13,7 @@ import queue
 import time
 import dbus
 import dbus.service
+import argparse
 from gi.repository import GLib
 
 def is_initialized(args):
@@ -23,10 +24,13 @@ def get_vendor_type(args):
     ret = "MAINLINE"
     if vndk_str != "":
         vndk = int(vndk_str)
-        if vndk > 31:
-            vndk -= 1 # 12L -> Halium 12
         if vndk > 19:
-            ret = "HALIUM_" + str(vndk - 19)
+            halium_ver = vndk - 19
+            if vndk > 31:
+                halium_ver -= 1 # 12L -> Halium 12
+            ret = "HALIUM_" + str(halium_ver)
+            if vndk == 32:
+                ret += "L"
 
     return ret
 
@@ -47,7 +51,11 @@ def setup_config(args):
     preinstalled_images_paths = tools.config.defaults["preinstalled_images_paths"]
     for preinstalled_images in preinstalled_images_paths:
         if os.path.isdir(preinstalled_images):
-            if os.path.isfile(preinstalled_images + "/system.img") and os.path.isfile(preinstalled_images + "/vendor.img"):
+            system_path = preinstalled_images + "/system.img"
+            vendor_path = preinstalled_images + "/vendor.img"
+            system_exists = os.path.isfile(system_path) or stat.S_ISBLK(os.stat(system_path).st_mode)
+            vendor_exists = os.path.isfile(vendor_path) or stat.S_ISBLK(os.stat(vendor_path).st_mode)
+            if system_exists and vendor_exists:
                 has_preinstalled_images = True
                 args.images_path = preinstalled_images
                 break
@@ -114,90 +122,97 @@ def setup_config(args):
     return True
 
 def init(args):
-    if not is_initialized(args) or args.force:
-        initializer_service = None
-        try:
-            initializer_service = tools.helpers.ipc.DBusContainerService("/Initializer", "id.waydro.Initializer")
-        except dbus.DBusException:
-            pass
-        if not setup_config(args):
-            return
-        status = "STOPPED"
-        if os.path.exists(tools.config.defaults["lxc"] + "/waydroid"):
-            status = helpers.lxc.status(args)
-        if status != "STOPPED":
+    if is_initialized(args) and not args.force:
+        logging.info("Already initialized")
+
+    if not setup_config(args):
+        return
+
+    status = "STOPPED"
+    session = None
+    if os.path.exists(tools.config.defaults["lxc"] + "/waydroid"):
+        status = helpers.lxc.status(args)
+    if status != "STOPPED":
+        if "running_init_in_service" in args:
+            session = args.session
+            tools.actions.container_manager.stop(args, False)
+        else:
             logging.info("Stopping container")
             try:
                 container = tools.helpers.ipc.DBusContainerService()
-                args.session = container.GetSession()
+                session = container.GetSession()
                 container.Stop(False)
             except Exception as e:
                 logging.debug(e)
-                tools.actions.container_manager.stop(args)
-        if args.images_path not in tools.config.defaults["preinstalled_images_paths"]:
-            helpers.images.get(args)
-        else:
-            helpers.images.remove_overlay(args)
-        if not os.path.isdir(tools.config.defaults["rootfs"]):
-            os.mkdir(tools.config.defaults["rootfs"])
-        if not os.path.isdir(tools.config.defaults["overlay"]):
-            os.mkdir(tools.config.defaults["overlay"])
-            os.mkdir(tools.config.defaults["overlay"]+"/vendor")
-        if not os.path.isdir(tools.config.defaults["overlay_rw"]):
-            os.mkdir(tools.config.defaults["overlay_rw"])
-            os.mkdir(tools.config.defaults["overlay_rw"]+"/system")
-            os.mkdir(tools.config.defaults["overlay_rw"]+"/vendor")
-        helpers.drivers.probeAshmemDriver(args)
-        helpers.lxc.setup_host_perms(args)
-        helpers.lxc.set_lxc_config(args)
-        helpers.lxc.make_base_props(args)
-        if status != "STOPPED":
-            logging.info("Starting container")
-            try:
-                container.Start(args.session)
-            except Exception as e:
-                logging.debug(e)
-                logging.error("Failed to restart container. Please do so manually.")
-
-        if "running_init_in_service" not in args or not args.running_init_in_service:
-            try:
-                if initializer_service:
-                    initializer_service.Done()
-            except dbus.DBusException:
-                pass
+                tools.actions.container_manager.stop(args, False)
+    if args.images_path not in tools.config.defaults["preinstalled_images_paths"]:
+        helpers.images.get(args)
     else:
-        logging.info("Already initialized")
-
-def wait_for_init(args):
-    helpers.ipc.create_channel("remote_init_output")
-
-    mainloop = GLib.MainLoop()
-    dbus_obj = DbusInitializer(mainloop, dbus.SystemBus(), '/Initializer', args)
-    mainloop.run()
-
-    # After init
-    dbus_obj.remove_from_connection()
+        helpers.images.remove_overlay(args)
+    if not os.path.isdir(tools.config.defaults["rootfs"]):
+        os.mkdir(tools.config.defaults["rootfs"])
+    if not os.path.isdir(tools.config.defaults["overlay"]):
+        os.mkdir(tools.config.defaults["overlay"])
+        os.mkdir(tools.config.defaults["overlay"]+"/vendor")
+    if not os.path.isdir(tools.config.defaults["overlay_rw"]):
+        os.mkdir(tools.config.defaults["overlay_rw"])
+        os.mkdir(tools.config.defaults["overlay_rw"]+"/system")
+        os.mkdir(tools.config.defaults["overlay_rw"]+"/vendor")
+    helpers.drivers.probeAshmemDriver(args)
+    helpers.lxc.setup_host_perms(args)
+    helpers.lxc.set_lxc_config(args)
+    helpers.lxc.make_base_props(args)
+    if status != "STOPPED":
+        try:
+            if "running_init_in_service" in args:
+                tools.actions.container_manager.do_start(args, session)
+            else:
+                logging.info("Starting container")
+                container.Start(session)
+        except Exception as e:
+            logging.debug(e)
+            logging.error("Failed to restart container. Please do so manually.")
 
 class DbusInitializer(dbus.service.Object):
     def __init__(self, looper, bus, object_path, args):
         self.args = args
         self.looper = looper
+        self.worker_thread = None
         dbus.service.Object.__init__(self, bus, object_path)
 
+    @helpers.logging.log_exceptions
     @dbus.service.method("id.waydro.Initializer", in_signature='a{ss}', out_signature='', sender_keyword="sender", connection_keyword="conn")
     def Init(self, params, sender=None, conn=None):
+        if self.worker_thread is not None:
+            self.worker_thread.kill()
+            self.worker_thread.join()
+
         channels_cfg = tools.config.load_channels()
         no_auth = params["system_channel"] == channels_cfg["channels"]["system_channel"] and \
                   params["vendor_channel"] == channels_cfg["channels"]["vendor_channel"]
         if no_auth or ensure_polkit_auth(sender, conn, "id.waydro.Initializer.Init"):
-            threading.Thread(target=remote_init_server, args=(self.args, params)).start()
+            self.worker_thread = remote_init_server(self.args, self, params)
         else:
             raise PermissionError("Polkit: Authentication failed")
 
+    @helpers.logging.log_exceptions
     @dbus.service.method("id.waydro.Initializer", in_signature='', out_signature='')
-    def Done(self):
-        if is_initialized(self.args):
-            self.looper.quit()
+    def Cancel(self):
+        if self.worker_thread is not None:
+            self.worker_thread.kill()
+            self.worker_thread.join()
+
+    @dbus.service.signal("id.waydro.Initializer", signature='s')
+    def ProgressChanged(self, message):
+        pass
+
+    @dbus.service.signal("id.waydro.Initializer", signature='')
+    def Finished(self):
+        pass
+
+    @dbus.service.signal("id.waydro.Initializer", signature='')
+    def Interrupted(self):
+        pass
 
 def ensure_polkit_auth(sender, conn, privilege):
     dbus_info = dbus.Interface(conn.get_object("org.freedesktop.DBus", "/org/freedesktop/DBus/Bus", False), "org.freedesktop.DBus")
@@ -216,55 +231,42 @@ def ensure_polkit_auth(sender, conn, privilege):
     except dbus.DBusException:
         raise PermissionError("Polkit: Authentication timed out")
 
-def background_remote_init_process(args):
-    with helpers.ipc.open_channel("remote_init_output", "wb") as channel_out:
-        class StdoutRedirect(logging.StreamHandler):
-            def write(self, s):
-                channel_out.write(str.encode(s))
-            def flush(self):
-                pass
-            def emit(self, record):
-                if record.levelno >= logging.INFO:
-                    self.write(self.format(record) + self.terminator)
+class StdoutRedirect(logging.StreamHandler):
+    def __init__(self, pipe):
+        logging.StreamHandler.__init__(self)
+        self.pipe = pipe
+    def write(self, s):
+        self.pipe.send(s)
+    def flush(self):
+        pass
+    def emit(self, record):
+        if record.levelno >= logging.INFO:
+            self.write(self.format(record) + self.terminator)
 
-        out = StdoutRedirect()
-        sys.stdout = sys.stderr = out
-        logging.getLogger().addHandler(out)
+def remote_init_proc_entry(args, pipe):
+    out = StdoutRedirect(pipe)
+    sys.stdout = sys.stderr = out
 
-        ctl_queue = queue.Queue()
-        def try_init(args):
-            try:
-                init(args)
-            except Exception as e:
-                print(str(e))
-            finally:
-                ctl_queue.put(0)
+    helpers.logging.add_verbose_log_level()
+    logging.getLogger().addHandler(out)
 
-        def poll_pipe():
-            poller = select.poll()
-            poller.register(channel_out, select.POLLERR)
-            poller.poll()
-            # When reaching here the client was terminated
-            ctl_queue.put(0)
+    try:
+        init(args)
+        sys.exit(0)
+    except KeyboardInterrupt:
+        sys.exit(1)
+    except Exception:
+        logging.exception("Exception during init")
+        sys.exit(1)
+    finally:
+        pipe.close()
 
-        init_thread = threading.Thread(target=try_init, args=(args,))
-        init_thread.daemon = True
-        init_thread.start()
-
-        poll_thread = threading.Thread(target=poll_pipe)
-        poll_thread.daemon = True
-        poll_thread.start()
-
-        # Join any one of the two threads
-        # Then exit the subprocess to kill the remaining thread.
-        # Can you believe this is the only way to kill a thread in python???
-        ctl_queue.get()
-
-        sys.stdout = sys.__stdout__
-        sys.stderr = sys.__stderr__
-        logging.getLogger().removeHandler(out)
-
-def remote_init_server(args, params):
+def remote_init_server(_args, dbus_obj, params):
+    args = argparse.Namespace()
+    tools.prep_args(args)
+    args.details_to_stdout = _args.details_to_stdout
+    args.verbose = _args.verbose
+    args.quiet = _args.quiet
     args.force = True
     args.images_path = ""
     args.rom_type = ""
@@ -273,33 +275,34 @@ def remote_init_server(args, params):
     args.system_type = params["system_type"]
     args.running_init_in_service = True
 
-    p = multiprocessing.Process(target=background_remote_init_process, args=(args,))
-    p.daemon = True
+    parent_conn, child_conn = multiprocessing.Pipe(False)
+    p = multiprocessing.Process(target=remote_init_proc_entry, args=(args, child_conn,), daemon=True)
     p.start()
-    p.join()
+
+    def monitor_init(p, pipe):
+        try:
+            while True:
+                dbus_obj.ProgressChanged(pipe.recv())
+        except EOFError:
+            pass
+
+        p.join()
+        if p.exitcode == 0:
+            GLib.idle_add(dbus_obj.Finished)
+        else:
+            GLib.idle_add(dbus_obj.Interrupted)
+
+    t = threading.Thread(target=monitor_init, args=(p, parent_conn,), daemon=True)
+    t.kill = lambda: p.kill()
+    t.start()
+    return t
+
 
 def remote_init_client(args):
     # Local imports cause Gtk is intrusive
     import gi
     gi.require_version("Gtk", "3.0")
     from gi.repository import Gtk
-
-    bus = dbus.SystemBus()
-
-    if is_initialized(args):
-        try:
-            tools.helpers.ipc.DBusContainerService("/Initializer", "id.waydro.Initializer").Done()
-        except dbus.DBusException:
-            pass
-        return
-
-    def notify_and_quit(caller):
-        if is_initialized(args):
-            try:
-                tools.helpers.ipc.DBusContainerService("/Initializer", "id.waydro.Initializer").Done()
-            except dbus.DBusException:
-                pass
-        GLib.idle_add(Gtk.main_quit)
 
     class WaydroidInitWindow(Gtk.Window):
         def __init__(self):
@@ -329,10 +332,14 @@ def remote_init_client(args):
             self.vndOta = vndOtaEntry.get_buffer()
 
             sysTypeLabel = Gtk.Label("Android Type")
-            sysTypeCombo = Gtk.ComboBoxText()
-            sysTypeCombo.set_entry_text_column(0)
-            for t in ["VANILLA", "GAPPS"]:
-                sysTypeCombo.append_text(t)
+            sysTypesStore = Gtk.ListStore(str, str)
+            sysTypesStore.append(["VANILLA", "Minimal Android"])
+            sysTypesStore.append(["GAPPS", "Android with Google Apps"])
+
+            sysTypeCombo = Gtk.ComboBox.new_with_model(sysTypesStore)
+            renderer_text = Gtk.CellRendererText()
+            sysTypeCombo.pack_start(renderer_text, True)
+            sysTypeCombo.add_attribute(renderer_text, "text", 1)
             sysTypeCombo.set_active(0)
             grid.attach(sysTypeLabel, 0, 2, 1, 1)
             grid.attach_next_to(sysTypeCombo, sysTypeLabel, Gtk.PositionType.RIGHT, 2, 1)
@@ -362,7 +369,10 @@ def remote_init_client(args):
             self.outBuffer = outTextView.get_buffer()
             self.outBuffer.create_mark("end", self.outBuffer.get_end_iter(), False)
 
-            self.open_channel = None
+            self.bus_signals = []
+            self.initializing = False
+
+            self.connect("destroy", self.on_destroy)
 
         def scroll_to_bottom(self):
             self.outTextView.scroll_mark_onscreen(self.outBuffer.get_mark("end"))
@@ -371,73 +381,76 @@ def remote_init_client(args):
             widget.set_sensitive(False)
             self.doneBtn.hide()
             self.outTextView.show()
-            init_params = (self.sysOta.get_text(), self.vndOta.get_text(), self.sysType.get_active_text())
-            init_runner = threading.Thread(target=self.run_init, args=init_params)
-            init_runner.daemon = True
-            init_runner.start()
+            sysType = self.sysType.get_model()[self.sysType.get_active_iter()][0]
+            self.run_init(self.sysOta.get_text(), self.vndOta.get_text(), sysType)
+
+        def draw(self, s):
+            if s.startswith('\r'):
+                last = self.outBuffer.get_iter_at_line(self.outBuffer.get_line_count()-1)
+                last.backward_char()
+                self.outBuffer.delete(last, self.outBuffer.get_end_iter())
+            self.outBuffer.insert(self.outBuffer.get_end_iter(), s)
+            self.scroll_to_bottom()
+
+        def on_progress(self, message):
+            self.draw(message)
+
+        def on_finished(self):
+            self.initializing = False
+            if is_initialized(args):
+                self.doneBtn.show()
+                self.draw("\nDone\n")
+
+        def on_interrupted(self):
+            self.initializing = False
+            self.draw("\nInterrupted\n")
+
+        def on_reply(self):
+            self.downloadBtn.set_sensitive(True)
+
+        def on_bus_error(self, e):
+            if e.get_dbus_name() == "org.freedesktop.DBus.Python.PermissionError":
+                self.draw(e.get_dbus_message().splitlines()[-1] + "\n")
+            else:
+                self.draw(str(e))
+            self.downloadBtn.set_sensitive(True)
+
+        def on_destroy(self, _):
+            if self.initializing:
+                try:
+                    tools.helpers.ipc.DBusContainerService("/Initializer", "id.waydro.Initializer").Cancel()
+                except Exception as e:
+                    logging.debug("Unexpected error while cancelling initializer: %s", e)
+            Gtk.main_quit()
 
         def run_init(self, systemOta, vendorOta, systemType):
-            def draw_sync(s):
-                if s.startswith('\r'):
-                    last = self.outBuffer.get_iter_at_line(self.outBuffer.get_line_count()-1)
-                    last.backward_char()
-                    self.outBuffer.delete(last, self.outBuffer.get_end_iter())
-                self.outBuffer.insert(self.outBuffer.get_end_iter(), s)
-                self.scroll_to_bottom()
-            def draw(s):
-                GLib.idle_add(draw_sync, s)
+            for signal in self.bus_signals:
+                signal.remove()
 
-            if self.open_channel is not None:
-                self.open_channel.close()
-                # Wait for other end to reset
-                time.sleep(1)
+            self.draw("\nWaiting for waydroid container service...\n")
+            self.bus_signals = []
+            self.initializing = True
 
-            draw("Waiting for waydroid container service...\n")
             try:
+                initializer = tools.helpers.ipc.DBusContainerService("/Initializer", "id.waydro.Initializer")
+
+                self.bus_signals.append(initializer.connect_to_signal("ProgressChanged", self.on_progress))
+                self.bus_signals.append(initializer.connect_to_signal("Finished", self.on_finished))
+                self.bus_signals.append(initializer.connect_to_signal("Interrupted", self.on_interrupted))
+
                 params = {
-                    "system_channel": self.sysOta.get_text(),
-                    "vendor_channel": self.vndOta.get_text(),
-                    "system_type": self.sysType.get_active_text()
+                    "system_channel": systemOta,
+                    "vendor_channel": vendorOta,
+                    "system_type": systemType
                 }
-                tools.helpers.ipc.DBusContainerService("/Initializer", "id.waydro.Initializer").Init(params, timeout=310)
+                initializer.Init(params, reply_handler=self.on_reply, error_handler=self.on_bus_error)
             except dbus.DBusException as e:
-                if e.get_dbus_name() == "org.freedesktop.DBus.Python.PermissionError":
-                    draw(e.get_dbus_message().splitlines()[-1] + "\n")
-                else:
-                    draw("The waydroid container service is not listening\n")
-                GLib.idle_add(self.downloadBtn.set_sensitive, True)
-                return
-
-            with helpers.ipc.open_channel("remote_init_output", "rb") as channel:
-                self.open_channel = channel
-                GLib.idle_add(self.downloadBtn.set_sensitive, True)
-                line = ""
-                try:
-                    while True:
-                        data = channel.read(1)
-                        if len(data) == 0:
-                            draw(line)
-                            break
-                        c = data.decode()
-                        if c == '\r':
-                            draw(line)
-                            line = c
-                        else:
-                            line += c
-                            if c == '\n':
-                                draw(line)
-                                line = ""
-                except:
-                    draw("\nInterrupted\n")
-
-            if is_initialized(args):
-                GLib.idle_add(self.doneBtn.show)
-                draw("Done\n")
-
+                self.on_bus_error(e)
+            except Exception as e:
+                self.draw(f"{e}\n")
 
     GLib.set_prgname("Waydroid")
     win = WaydroidInitWindow()
-    win.connect("destroy", notify_and_quit)
 
     win.show_all()
     win.outTextView.hide()

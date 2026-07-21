@@ -5,7 +5,6 @@ import os
 from tools import helpers
 from tools.helpers.version import versiontuple
 import tools.config
-import dbus
 
 def get_config(args):
     cfg = tools.config.load(args)
@@ -24,8 +23,13 @@ def migration(args):
             tools.helpers.run.user(args, ["chmod", "-R", "g-w,o-w"] + [os.path.join(args.work, f) for f in chmod_paths], check=False)
             tools.helpers.run.user(args, ["chmod", "g-w,o-w", args.work], check=False)
             os.remove(os.path.join(args.work, "session.cfg"))
-    except:
-        pass
+        if versiontuple(old_ver) <= versiontuple("1.6.0"):
+            # Because we now default adb to secure, disable auto_adb to avoid prompting the user on every session startup
+            cfg = tools.config.load(args)
+            cfg["waydroid"]["auto_adb"] = "False"
+            tools.config.save(args, cfg)
+    except Exception as e:
+        logging.debug("Error during migration: %s", e)
 
 def upgrade(args):
     get_config(args)
