@@ -95,6 +95,11 @@ def generate_nodes_lxc_config(args):
     make_entry(tools.config.defaults["host_perms"],
                "vendor/etc/host-permissions", options="bind,optional 0 0")
 
+    # Android 16 stores persistent aconfig state under /metadata. The rootfs
+    # is mounted read-only, so provide a writable host-backed directory.
+    make_entry(tools.config.defaults["metadata"], "metadata",
+               options="bind,create=dir 0 0")
+
     # Necessary sw_sync node for HWC
     make_entry("/dev/sw_sync")
     make_entry("/sys/kernel/debug", options="rbind,create=dir,optional 0 0")
@@ -159,6 +164,8 @@ def set_lxc_config(args):
                 config_snippets.append(snippet)
 
     command = ["mkdir", "-p", lxc_path]
+    tools.helpers.run.user(args, command)
+    command = ["mkdir", "-p", tools.config.defaults["metadata"]]
     tools.helpers.run.user(args, command)
     command = ["sh", "-c", "cat {} > \"{}\"".format(' '.join('"{0}"'.format(w) for w in config_snippets), lxc_path + "/config")]
     tools.helpers.run.user(args, command)
