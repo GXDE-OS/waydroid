@@ -25,6 +25,7 @@ def host():
         "i686": "x86",
         "x86_64": "x86_64",
         "aarch64": "arm64",
+        "loongarch64": "loongarch64",
         "armv7l": "arm",
         "armv8l": "arm"
     }
