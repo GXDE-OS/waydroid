@@ -12,6 +12,7 @@ import time
 import platform
 import gbinder
 import tools.config
+import tools.helpers.identity
 import tools.helpers.run
 from contextlib import suppress
 from pathlib import Path
@@ -264,6 +265,15 @@ def make_base_props(args):
             return False
 
     props = []
+
+    identity = tools.helpers.identity.load_or_create(args.work)
+    props.extend([
+        "ro.serialno=" + identity["serial"],
+        "ro.boot.serialno=" + identity["serial"],
+        "ro.boot.waydroid.imei=" + identity["imei"],
+        "ro.boot.waydroid.imsi=" + identity["imsi"],
+        "ro.boot.waydroid.iccid=" + identity["iccid"],
+    ])
 
     if not os.path.exists("/dev/ashmem"):
         props.append("sys.use_memfd=true")
