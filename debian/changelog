@@ -1,3 +1,9 @@
+waydroid (1.6.3gxde1) UNRELEASED; urgency=medium
+
+  * Loongarch64 support
+
+ -- gfdgd_xi <3025613752@qq.com>  Sun, 16 Aug 2026 09:42:44 +0800
+
 waydroid (1.6.3) bullseye; urgency=medium
 
   * tools: Fix all occurrences of unused variable warning
